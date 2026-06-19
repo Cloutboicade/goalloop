@@ -73,6 +73,34 @@ bash install.sh                   # inside a clone of the standalone goalloop re
 It's safe and idempotent: it auto-detects your stack's build/test commands, never
 clobbers your `config.yml`, never touches your source, and can be re-run anytime.
 
+### Upgrading an existing install
+
+Re-run the exact same one-liner from the repo root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Cloutboicade/goalloop/main/install.sh | bash
+```
+
+It **refreshes the playbooks to the latest version** while **preserving your
+`.goalloop/config.yml`** (it's never overwritten). Commit the changed files. That's the
+whole upgrade — your tasks, labels, and settings are untouched.
+
+## Built to scale (v3)
+
+The breakdown and execution are designed to be safe at any size and never need a redo:
+
+- **Idempotent, resumable triage.** A big brain dump becomes a checklist *ledger* in the
+  epic; each run carves the next batch and checks lines off — so it **never duplicates,
+  never loses an item**, and resumes mid-breakdown. Hundreds of tasks across many runs is fine.
+- **Right-sized, not fixed-count.** One task per real deliverable — the count follows the
+  work, never a quota. Sub-areas that are themselves big become **nested epics** and get
+  broken down further (unlimited depth).
+- **Careful execute.** Understand-before-touching, smallest correct change, a test that
+  locks it, **fix-forward** verify, a self-review of the diff, and **stop-and-ask (block)
+  on any ambiguity** rather than guess. It never opens a PR that fails the gate.
+- **Self-healing loop.** Reconciles merged / stuck / orphaned tasks, respects
+  `Depends on #N`, and keeps exactly one task in flight at a time.
+
 Then:
 
 1. **Edit `.goalloop/config.yml`** — one line on what the project is, and confirm the

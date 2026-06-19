@@ -85,154 +85,212 @@ policy:
   auto_merge: false           # if true, loop may merge a PR once CI is green — but
                               # ONLY for issues that also carry the 'autopilot' label
   max_tasks_per_run: 1        # finish one task fully before starting the next
+
+triage:
+  max_new_issues_per_run: 20  # carve big epics in batches across runs (rate-limit safe);
+                              # the loop resumes a half-carved epic on the next run
+execute:
+  max_fix_attempts: 3         # fix-forward tries on a failing verify before parking a task
 EOF
   say "  wrote:  .goalloop/config.yml (verify auto-detected: check='${CHECK_CMD:-<none>}')"
 fi
 
 # --- Playbooks (agent-neutral; always refreshed) ------------------------------
 cat > .goalloop/playbooks/triage.md <<'EOF'
-# Playbook — TRIAGE: turn raw `inbox` issues into a clean `ready` queue
+# Playbook — TRIAGE: turn raw `inbox` issues into a clean, right-sized `ready` queue
 
-You are triaging the backlog for THIS repository. **Planning only — write no code,
-open no PRs.** Use the `gh` CLI for every GitHub action (the universal interface).
-Read `.goalloop/config.yml` (and `AGENTS.md` / `CLAUDE.md` if present) for context.
+**Planning only — write NO code, open NO PRs.** Use the `gh` CLI for every GitHub
+action. Read `.goalloop/config.yml` (and `AGENTS.md` / `CLAUDE.md` if present) for
+context, the verify stack, and `triage.max_new_issues_per_run` (default 20).
+
+Three guarantees you must uphold: **never duplicate** an item, **never lose** an item,
+**right-size** every task — the count follows the work, never a fixed quota like 5–7.
 
 ## 1. Find work
 ```
-gh issue list --label inbox --state open --json number,title,body,labels --limit 100
+gh issue list --label inbox --state open --json number,title,body,labels --limit 200
 ```
-Process each issue.
+Count NEW issues you create this run; stop creating once you reach
+`triage.max_new_issues_per_run` (default 20) so you never trip GitHub's bulk-creation
+rate limit. Anything unfinished resumes automatically on the next run.
 
-## 2. Atomic or epic?
-- **Atomic** = one coherent change a single session can finish and verify.
-- **Epic** = bundles several independent changes (the Brain-dump template, or a Task
-  that smuggled in multiple asks).
+## 2. Classify each inbox issue
+- **Atomic** — one coherent deliverable a single session can implement AND verify.
+- **Epic** — multiple independent deliverables (a brain dump, or a task with several
+  asks). Judge by content, not by how long the text is.
 
-## 3. If ATOMIC
-- If it has no acceptance criteria, comment 2–4 concrete, checkable ones
-  (cite real files/areas — see the config/AGENTS.md): `gh issue comment <n> --body "..."`
-- Read the stated priority; promote it:
-  `gh issue edit <n> --remove-label inbox --add-label ready --add-label "priority:<high|med|low>"`
+## 3. ATOMIC → sharpen and promote
+1. Read enough of the repo to ground it. Add/refine **2–5 concrete, checkable acceptance
+   criteria** citing the real files/areas the work will touch (`gh issue comment`).
+2. If you realize it's too big to finish+verify in one session, treat it as an EPIC.
+3. **Dependencies:** if it can't start until another task is done, add a line
+   `Depends on #M` to its body and label it `blocked` (not `ready`) until #M is `done`.
+4. Otherwise promote:
+   `gh issue edit <n> --remove-label inbox --add-label ready --add-label "priority:<high|med|low>"`
 
-## 4. If EPIC — break it down (this is the part you wanted automated)
-For each real task inside it, create a child issue. Prefer the native `--parent` flag
-(recent `gh`) so GitHub links it as a real sub-issue; if your `gh` is older and rejects
-`--parent`, drop it and rely on the checklist below.
+## 4. EPIC → plan once, then carve in idempotent batches (scales to ANY size)
+The epic body is the **ledger** — that is what makes this resumable and duplicate-proof.
+
+### A. Write the plan ONCE
+If the body has no `## GoalLoop plan` section yet, analyze the dump and append one:
+- One `- [ ]` line per intended task — **as many as the dump truly warrants** (3 or 300).
+  Don't merge distinct deliverables; don't shatter one deliverable into noise.
+- For large dumps, group lines under `### <theme>` headers and order them so foundations
+  come before the features that depend on them. Note couplings inline: `(after: <line>)`.
 ```
-gh issue create --parent <epic> \
-  --title "<sharp title>" \
-  --body $'Goal: <one paragraph>\n\nAcceptance:\n- [ ] ...' \
-  --label ready --label "priority:<p>"
-```
-**Always** also write the plan into the epic body as a checklist — it's human-visible
-and the fallback when `--parent` isn't supported:
-```
-gh issue edit <epic> --body "<original text>
+gh issue edit <epic> --body "<original dump text>
 
-### Plan
-- [ ] #<child1> <title>
-- [ ] #<child2> <title>"
+## GoalLoop plan
+### <theme 1>
+- [ ] <task>
+- [ ] <task>
+### <theme 2>
+- [ ] <task>"
 ```
-Keep the `epic` label, remove `inbox`. **Do not** mark the epic `ready`.
 
-## 5. If it CAN'T be made executable
-(Needs your decision/info, or depends on something unbuilt.)
+### B. Carve the next batch into real issues
+Take the next UNCHECKED `- [ ]` lines (up to the per-run cap). For each:
+1. Create the child (prefer native `--parent`; the ledger checklist is the always-true backbone):
+```
+gh issue create --parent <epic> --title "<sharp title>" \
+  --body $'Goal: <one paragraph>\n\nAcceptance:\n- [ ] <concrete, file-anchored>\n\nContext: epic #<epic>.' \
+  --label <ready|inbox> --label "priority:<p>"
+```
+   - If that line is itself a multi-deliverable area, create it as a **nested epic**:
+     label it `epic` + `inbox` (NOT `ready`). A later pass breaks it down too — depth is
+     unlimited. This is how the system "expands what needs expanding."
+   - If it depends on a sibling, add `Depends on #M` to its body and label it `blocked`.
+2. After creating the batch, **edit the epic body once** to check off exactly the lines you
+   just carved, recording each issue number: `- [x] #<new> <title>`. A re-run only ever
+   processes still-unchecked lines, so nothing is duplicated and nothing is lost.
+
+### C. Finish or hand off
+- Unchecked lines remain (you hit the cap) → leave the epic `inbox`+`epic` and STOP. The
+  next `/run-queue` resumes exactly here.
+- Every line checked → fully carved: `gh issue edit <epic> --remove-label inbox` (keep `epic`).
+
+## 5. Can't be made executable?
+Needs a human decision, missing info, or an unbuilt dependency:
 ```
 gh issue edit <n> --remove-label inbox --add-label blocked
-gh issue comment <n> --body "Blocked: <exactly what's needed>"
+gh issue comment <n> --body "Blocked: <exactly what's needed / the decision required>"
 ```
+Never guess on ambiguous scope — a blocked issue with a crisp question beats a wrong task.
 
 ## Rules
-- Keep tasks small. Unsure if it's one task or two? Make it two.
-- Never delete an issue — re-label + comment. The issue is the audit trail.
+- One task = one clear outcome. Unsure if it's one or two? Make two.
+- Never delete an issue. Never recreate a checked line. Never drop an item.
 
-## Done
-Print: issues triaged, sub-issues created, and the current `ready` count
-(`gh issue list --label ready --state open --json number -q 'length'`).
+## Report
+Issues triaged, new children created this run, epics still carving (with remaining
+unchecked counts), and the current `ready` count.
 EOF
 
 cat > .goalloop/playbooks/execute.md <<'EOF'
-# Playbook — EXECUTE: fully implement, test, and PR exactly ONE issue
+# Playbook — EXECUTE: implement, test, and PR exactly ONE issue, with maximum care
 
-You are given one issue number **N** (the highest-priority `ready` task). Do exactly
-this one task. Read `.goalloop/config.yml` for the verify commands + policy, and
-honor `AGENTS.md` / `CLAUDE.md` if present. Use `gh` for GitHub.
+You are given one issue number **N**. Do ONLY this task. Read `.goalloop/config.yml`
+(verify commands, policy, `execute.max_fix_attempts` — default 3) and honor
+`AGENTS.md` / `CLAUDE.md`. Use `gh` for GitHub.
 
-## 0. Claim it
+## 0. Resume or claim (idempotent)
 ```
-gh issue view N --json number,title,body,labels
+gh issue view N --json number,title,body,labels,state
 ```
-If it's `blocked` or missing info you need → stop, comment why, leave it.
-Otherwise: `gh issue edit N --remove-label ready --add-label in-progress`
+- If it's `blocked`, you lack info to finish, or a `Depends on #M` is not yet `done` →
+  STOP, comment why, leave it. Don't start.
+- Check for prior work: `gh pr list --state all --head <branch_prefix>task-N-` and the branch.
+  - An OPEN PR/branch for N already exists → **resume it** (check it out); don't start over.
+  - Otherwise → `gh issue edit N --remove-label ready --add-label in-progress`.
 
-## 1. Branch
+## 1. Understand before touching anything
+- Read the issue + its parent epic for the full intent and acceptance criteria.
+- Read the actual code you will change, its tests, and its callers. Decide the **smallest
+  change that satisfies every acceptance criterion.**
+- If reality contradicts the issue (the thing described doesn't exist, or differs) → STOP,
+  comment the discrepancy, label `blocked`. Surfacing a wrong assumption beats building wrong.
+
+## 2. Branch
 ```
 git fetch origin && git checkout <default_branch> && git pull --ff-only
 git checkout -b <branch_prefix>task-N-<short-slug>
 ```
-The branch MUST start with `git.branch_prefix` from config — some hosts only allow
-pushes to that prefix, so a wrong prefix means the push is rejected and no PR appears.
+The branch MUST start with `git.branch_prefix` from config (some hosts only allow pushes
+to that prefix, else the push is rejected and no PR appears).
 
-## 2. Build — smallest correct change
-- Follow the repo's conventions (config / AGENTS.md / CLAUDE.md): where code lives,
-  style, and any data-safety rules. Match the surrounding code.
-- **Lock new logic with a test in the same commit.** The test is the contract.
-- If it needs a migration or any manual step, call it out loudly in the PR body.
+## 3. Implement — smallest correct change, maximum care
+- Match the surrounding code exactly: structure, naming, layers, conventions.
+- Touch ONLY what this task needs. No drive-by refactors, no unrelated files, no scope creep.
+- Honor every data-safety rule / invariant the repo documents (merge not clobber; confirm +
+  reversible destructive actions; etc.). If the task would violate one, STOP and `blocked`.
+- **Lock the new logic with a test in the same commit** — it encodes the acceptance criteria
+  and would fail without your change.
 
-## 3. Verify — green is necessary, not sufficient
-Run each non-empty `verify:` command from config, in order. ALL must pass before a PR exists:
-```
-<verify.install>
-<verify.check>
-<verify.build>
-```
+## 4. Verify — fix-forward, never ship broken
+Run each non-empty `verify:` command from config, in order: install → check → build.
+- A step fails → diagnose and fix, up to `execute.max_fix_attempts` times (default 3).
+- Still failing after the cap, or a real fix would balloon scope → revert the branch to
+  clean, comment the exact failure + what you tried, and set the issue back to `ready`
+  (or `blocked` if it needs a decision). **NEVER open a PR that doesn't pass the gate.**
 
-## 4. Open a PR (never push straight to the default branch)
+## 5. Self-review the diff (be your own strict reviewer)
+Re-read `git diff`:
+- Does it satisfy EVERY acceptance criterion? Check each off.
+- Any scope creep, leftover debug, or convention/data-safety violation? Fix or revert it.
+- Is the test meaningful (it fails without the change)?
+
+## 6. Open the PR (never push to the default branch)
 ```
 git add -A && git commit -m "<concise summary> (closes #N)"
 git push -u origin HEAD
 gh pr create --base <default_branch> --fill \
-  --body $'What changed: ...\n\nAcceptance:\n- [x] ...\n\nTests added: ...\nVerify: check ✅ build ✅\n\nCloses #N'
+  --body $'What changed: ...\n\nAcceptance:\n- [x] ...\n\nTests added: ...\nVerify: check OK, build OK\n\nCloses #N'
 ```
+Add a session link if `CLAUDE_CODE_REMOTE_SESSION_ID` is set.
 
-## 5. Hand off
-- Leave the issue `in-progress` (merging the PR closes it; run-queue reconciles to `done`).
-- Auto-merge **only** if config `policy.auto_merge: true` AND the issue carries the
-  `autopilot` label AND CI is green: `gh pr merge --squash --auto`. Otherwise leave it
-  for human review. If the default branch auto-deploys to prod, never merge unreviewed.
+## 7. Hand off
+- Leave N `in-progress` (merge closes it; run-queue reconciles to `done`).
+- Auto-merge ONLY if `policy.auto_merge: true` AND the issue has `autopilot` AND CI is green
+  (`gh pr merge --squash --auto`). Otherwise park for review. If the default branch
+  auto-deploys to prod, never merge unreviewed work.
 
-Print: the PR URL, each verify step's pass/fail, and merged-or-awaiting-review.
+## Report
+PR URL, each verify step's pass/fail, acceptance-criteria coverage, and merged-or-awaiting-
+review. If you stopped (blocked/failed), state exactly why and what's needed.
 EOF
 
 cat > .goalloop/playbooks/run-queue.md <<'EOF'
-# Playbook — RUN-QUEUE: the loop. ONE unit of progress per run, then stop.
+# Playbook — RUN-QUEUE: one safe unit of progress, then stop.
 
-Read `.goalloop/config.yml`. Use `gh`. Do not try to drain the whole backlog in one
-session — per-task fresh sessions are the point (cheaper, sharper).
+Read `.goalloop/config.yml`. Use `gh`. Don't drain the whole backlog in one session —
+per-task fresh sessions are the point (cheaper, sharper, isolated).
 
-## 1. Reconcile what's in flight
-For every issue labeled `in-progress` (`gh issue list --label in-progress --state open --json number,title`):
+## 1. Reconcile (self-heal the board)
+For every `in-progress` issue (`gh issue list --label in-progress --state open --json number,title`):
 - Find its PR by branch (`gh pr list --state all --head <branch_prefix>task-<n>- --json number,state,merged`):
-  - **merged** → `gh issue edit <n> --remove-label in-progress --add-label done`
-  - **open** → a task is already in flight. **STOP. Do not start another.** Report which
-    issue/PR is open and exit. (This is the single-in-flight lock.)
-  - **closed, not merged** → `gh issue edit <n> --remove-label in-progress --add-label ready`
-    and comment that it needs another attempt.
+  - **merged** → `gh issue edit <n> --remove-label in-progress --add-label done`.
+  - **open** → genuinely in flight.
+  - **closed, not merged** → `--remove-label in-progress --add-label ready`; comment "needs retry".
+  - **no branch/PR at all** (orphaned/stale) → `--remove-label in-progress --add-label ready`;
+    comment "reset by reconcile".
+- If ANY issue is genuinely in flight (open PR) → **STOP. Do not start another.** Report it
+  and exit. (Single-in-flight lock = finish before moving on.)
 
 ## 2. Triage
-Run `.goalloop/playbooks/triage.md`: move new `inbox` issues to `ready` (split epics).
-Planning only — no code.
+Follow `.goalloop/playbooks/triage.md`: advance `inbox` → `ready`, continuing any half-carved
+epic from a prior run. Planning only — no code.
 
-## 3. Pick ONE
-From open `ready` issues, choose the highest priority (`priority:high` > `med` > `low`,
-then lowest issue number). Skip `blocked`. If none, print "queue empty" and exit.
+## 3. Pick ONE (priority + dependency aware)
+From open `ready` issues choose the highest priority (`priority:high` > `med` > `low`, then
+lowest number). SKIP any whose `Depends on #M` is not `done` (re-label those `blocked`).
+If nothing is ready: if epics are still carving, say so; else print "queue empty". Exit.
 
-## 4. Execute it
-Run `.goalloop/playbooks/execute.md` on that single issue.
+## 4. Execute
+Follow `.goalloop/playbooks/execute.md` on that single issue.
 
 ## 5. Report
-One screen: what you reconciled, triage counts, the task you executed (PR URL + verify
-results), and how many `ready` tasks remain.
+One screen: what you reconciled, triage progress (epics carving + unchecked remaining), the
+task executed (PR URL + verify results), and how many `ready` tasks remain.
 EOF
 say "  wrote:  .goalloop/playbooks/{triage,execute,run-queue}.md"
 
@@ -438,7 +496,7 @@ fi
 
 # --- Done ---------------------------------------------------------------------
 say ""
-say "GoalLoop installed."
+say "GoalLoop v3 installed (idempotent batched triage · recursive epics · careful execute)."
 [ -f CLAUDE.md ] || warn "no CLAUDE.md found — that's fine; the loop reads .goalloop/config.yml + AGENTS.md."
 case "${CHECK_CMD}" in "") warn "couldn't auto-detect a test command — edit verify.check in .goalloop/config.yml.";; esac
 say ""

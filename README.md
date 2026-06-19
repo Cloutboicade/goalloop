@@ -116,9 +116,13 @@ Then:
 
 You add tasks as issues, then point an agent at the loop. Pick yours:
 
+### Two ways to run it
+- **`/run-queue`** — one task per run, parks the PR for your review. Pair with a schedule for safe, hands-off, one-at-a-time progress.
+- **`/drain`** — builds **every** ready task back-to-back until the queue is empty. Fresh context per task, **auto-merges** each passing PR so the next builds on it, and resumes in a new session when context fills. Fastest path; ships via your test/build gate (set `drain.auto_merge: false` to open all PRs for batch review instead).
+
 ### Claude Code
-- **In a session:** `/run-queue` (or `/triage`, `/execute-issue <n>`).
-- **Hands-off:** run `/schedule`, set an hourly cadence with the prompt `/run-queue`.
+- **In a session:** `/run-queue` (or `/drain`, `/triage`, `/execute-issue <n>`).
+- **Hands-off:** run `/schedule`, set an hourly cadence with the prompt `/run-queue` (or `/drain` to clear the whole backlog each run).
   Runs on your subscription (no extra API key). Claude routines push `claude/`-prefixed
   branches by default — the kit already uses that prefix.
 

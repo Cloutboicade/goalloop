@@ -91,6 +91,11 @@ triage:
                               # the loop resumes a half-carved epic on the next run
 execute:
   max_fix_attempts: 3         # fix-forward tries on a failing verify before parking a task
+
+drain:                        # for /drain — build EVERY ready task back-to-back, no waiting
+  auto_merge: true            # merge each PR once its verify gate passes, so the next task
+                              # builds on it. true = fastest (ships to prod unreviewed —
+                              # your tests are the safety net). false = open all PRs for batch review.
 EOF
   say "  wrote:  .goalloop/config.yml (verify auto-detected: check='${CHECK_CMD:-<none>}')"
 fi
@@ -292,7 +297,48 @@ Follow `.goalloop/playbooks/execute.md` on that single issue.
 One screen: what you reconciled, triage progress (epics carving + unchecked remaining), the
 task executed (PR URL + verify results), and how many `ready` tasks remain.
 EOF
-say "  wrote:  .goalloop/playbooks/{triage,execute,run-queue}.md"
+
+cat > .goalloop/playbooks/drain.md <<'EOF'
+# Playbook — DRAIN: build EVERY ready task back-to-back until the queue is empty
+
+For maximum throughput — not one-task-at-a-time. **Fully autonomous; don't ask for approval.**
+Read `.goalloop/config.yml` (the `drain:` + verify sections) and honor `CLAUDE.md`/`AGENTS.md`.
+Use `gh`.
+
+## Loop — repeat until no `ready` tasks remain
+1. **Reconcile** (as in run-queue.md): merged→`done`, closed-unmerged→`ready`, orphaned
+   `in-progress`→`ready`.
+2. **Triage** any `inbox` issues into `ready` (idempotent — see triage.md).
+3. **Pick** the highest-priority `ready` task whose `Depends on #M` are all `done` (skip the
+   rest). If none remain → STOP and report "queue drained".
+4. **Build it in a FRESH subagent** (a clean context per task — this is what keeps quality
+   high and token use low) following `.goalloop/playbooks/execute.md`: pull the latest default
+   branch, branch, smallest correct change, a locking test, and the FULL verify gate.
+   - **Never open a PR that fails the gate.** If it can't pass after `execute.max_fix_attempts`,
+     label the issue `blocked` with the exact reason and move to the next task.
+5. **Advance:**
+   - `drain.auto_merge: true` → **merge the passing PR (squash), mark the issue `done`**, so the
+     next task builds on the updated code.
+   - `drain.auto_merge: false` → leave the PR open for batch review; move on. (Tasks that depend
+     on an unmerged one: leave them `blocked` until their dependency is merged.)
+6. **Fill gaps:** if you spot something genuinely required that wasn't asked for (a missing
+   dependency or setup step), create a new `ready` issue for it so it gets built too. **Never
+   silently expand the current task's scope.**
+
+## Guardrails (non-negotiable)
+- **Never guess.** Ambiguous or risky → label the task `blocked` with a crisp question, continue
+  with the others.
+- **Never ship a failing gate.** The verify gate is the error floor; a task that can't pass is
+  `blocked`, not merged.
+- **Context budget:** when YOUR context gets large, STOP cleanly, report exactly which issues are
+  `done` / `blocked` / still `ready`, and tell the user to re-run `/drain` in a FRESH session —
+  the GitHub labels hold all state, so a new session resumes seamlessly.
+
+## Report (as you go, and at the end)
+Per task: which one, gate pass/fail, merged / PR-opened / blocked (+ why). At the end: counts of
+done / open PRs / blocked / remaining, and whether the queue is empty.
+EOF
+say "  wrote:  .goalloop/playbooks/{triage,execute,run-queue,drain}.md"
 
 # --- Issue templates ----------------------------------------------------------
 cat > .github/ISSUE_TEMPLATE/config.yml <<EOF
@@ -445,7 +491,13 @@ description: GoalLoop — one loop pass (reconcile, triage, execute one task).
 ---
 Follow the playbook at `.goalloop/playbooks/run-queue.md` for this repository.
 EOF
-say "  wrote:  .claude/commands/{triage,execute-issue,run-queue}.md"
+cat > .claude/commands/drain.md <<'EOF'
+---
+description: GoalLoop — build EVERY ready task back-to-back until the queue is empty (fast, autonomous).
+---
+Follow the playbook at `.goalloop/playbooks/drain.md` for this repository.
+EOF
+say "  wrote:  .claude/commands/{triage,execute-issue,run-queue,drain}.md"
 
 # --- AGENTS.md hub (append a marked block, idempotent) ------------------------
 MARK_START="<!-- goalloop:start -->"
@@ -464,8 +516,10 @@ The universal interface is the `gh` CLI; project specifics live in `.goalloop/co
 - **Process new tasks (triage):** follow `.goalloop/playbooks/triage.md`.
 - **Do one task:** follow `.goalloop/playbooks/execute.md` with an issue number.
 - **Run the loop (reconcile → triage → execute one):** follow `.goalloop/playbooks/run-queue.md`.
+- **Drain the whole queue (build every ready task back-to-back, fast):** follow `.goalloop/playbooks/drain.md`.
 
-If a user says "run the task loop" / "drain the queue", follow `run-queue.md`.
+If a user says "run the task loop", follow `run-queue.md`. If they say "drain the queue" /
+"build everything" / "do all the tasks", follow `drain.md`.
 <!-- goalloop:end -->
 EOF
   say "  wrote:  AGENTS.md (GoalLoop section)"
